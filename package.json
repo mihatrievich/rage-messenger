@@ -1,0 +1,14 @@
+{
+  "name": "rage-messenger",
+  "version": "1.0.0",
+  "description": "RAGE - Modern real-time messenger",
+  "scripts": {
+    "start": "concurrently \"npm run server\" \"npm run client\"",
+    "server": "cd server && npm start",
+    "client": "cd client && set PORT=3001 && npm start",
+    "install-all": "npm install && cd server && npm install && cd ../client && npm install"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
