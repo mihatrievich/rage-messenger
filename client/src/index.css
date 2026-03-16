@@ -2,6 +2,10 @@
 @tailwind components;
 @tailwind utilities;
 
+html {
+  height: 100%;
+}
+
 * {
   margin: 0;
   padding: 0;
@@ -16,6 +20,8 @@ body {
   -moz-osx-font-smoothing: grayscale;
   background-color: #0b0b0f;
   color: #ffffff;
+  height: 100vh;
+  overflow: hidden;
 }
 
 code {
@@ -188,4 +194,21 @@ input:focus, textarea:focus {
   background: rgba(20, 20, 26, 0.8);
   backdrop-filter: blur(10px);
   border: 1px solid rgba(122, 60, 255, 0.2);
+}
+
+/* Developer/Verified badge */
+.developer-badge {
+  background: linear-gradient(135deg, #3b82f6 0%, #60a5fa 100%);
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 4px;
+}
+
+.developer-badge svg {
+  width: 10px;
+  height: 10px;
 }

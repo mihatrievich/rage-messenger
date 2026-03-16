@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
 
-// API URL - change this to your server IP for external connections
-const API_URL = 'http://localhost:3000';
-const SOCKET_URL = 'http://localhost:3000';
+// API URL - use localhost:3000 for Desktop app
+const API_URL = 'http://localhost:3000'; // Use this for Desktop
+const SOCKET_URL = 'http://localhost:3000'; // Use this for Desktop
 
 // Create axios instance
 const api = axios.create({
@@ -15,15 +15,53 @@ const api = axios.create({
 let socket;
 
 function App() {
-  const [user, setUser] = useState(null);
-  const [view, setView] = useState('login'); // login, register, chat
+  const [user, setUser] = useState(() => {
+    try {
+      const savedUser = localStorage.getItem('rage_user');
+      return savedUser ? JSON.parse(savedUser) : null;
+    } catch {
+      localStorage.removeItem('rage_user');
+      return null;
+    }
+  });
+  const [view, setView] = useState(user ? 'chat' : 'login'); // login, register, chat
+  
+  // Debug: wrap setView to log all changes
+  const debugSetView = (newView, reason = '') => {
+    console.log('[setView]', reason, 'from:', view, '-> to:', newView);
+    setView(newView);
+  };
+  
+  // Debug: log view changes
+  useEffect(() => {
+    console.log('View changed to:', view);
+  }, [view]);
+
+  // Update view when user changes
+  useEffect(() => {
+    console.log('User changed:', user, 'current view:', view);
+    if (user && view !== 'chat') {
+      console.log('Setting view to chat');
+      debugSetView('chat', 'user effect');
+    } else if (!user && view === 'chat') {
+      console.log('Setting view to login');
+      debugSetView('login', 'user effect');
+    }
+  }, [user]);
   const [friends, setFriends] = useState([]);
-  const [selectedChat, setSelectedChat] = useState(null);
+  const [selectedChat, setSelectedChat] = useState(() => {
+    try {
+      const savedChat = localStorage.getItem('rage_selected_chat');
+      return savedChat ? JSON.parse(savedChat) : null;
+    } catch {
+      localStorage.removeItem('rage_selected_chat');
+      return null;
+    }
+  });
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
-  const [showProfile, setShowProfile] = useState(false);
   const [viewingProfile, setViewingProfile] = useState(null);
   const [editingProfile, setEditingProfile] = useState(false);
   const [editBio, setEditBio] = useState('');
@@ -34,7 +72,30 @@ function App() {
 
   // Initialize socket connection
   useEffect(() => {
-    socket = io(SOCKET_URL);
+    // Connect to socket server with polling for cloudflare compatibility
+    socket = io(SOCKET_URL, {
+      transports: ['polling'],
+      cors: { 
+        origin: process.env.REACT_APP_ALLOWED_ORIGIN || window.location.origin 
+      }
+    });
+
+    // Handle connection errors
+    socket.on('connect_error', (error) => {
+      console.error('Socket connection error:', error.message);
+    });
+
+    socket.on('connect', () => {
+      console.log('Socket connected');
+      // Re-login user on reconnection
+      if (user) {
+        socket.emit('user:login', user.id);
+      }
+    });
+
+    socket.on('disconnect', (reason) => {
+      console.log('Socket disconnected:', reason);
+    });
 
     socket.on('message:receive', (message) => {
       if (selectedChat && (
@@ -67,9 +128,11 @@ function App() {
     };
   }, [selectedChat, user]);
 
-  // Scroll to bottom of messages
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  // Auto-scroll to bottom when new messages arrive
+  useLayoutEffect(() => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'auto' });
+    }
   }, [messages]);
 
   // Load messages when chat is selected
@@ -83,6 +146,13 @@ function App() {
     try {
       const res = await api.get(`/api/messages/${user.id}/${friendId}`);
       setMessages(res.data.messages);
+      
+      // Scroll to bottom after loading
+      requestAnimationFrame(() => {
+        if (messagesEndRef.current) {
+          messagesEndRef.current.scrollIntoView();
+        }
+      });
       
       // Mark messages as read
       const unreadMessages = res.data.messages.filter(
@@ -112,15 +182,30 @@ function App() {
     if (user) {
       loadFriends();
       socket.emit('user:login', user.id);
+      
+      // Auto-load messages if there's a saved chat
+      const savedChat = localStorage.getItem('rage_selected_chat');
+      if (savedChat) {
+        try {
+          const chat = JSON.parse(savedChat);
+          setSelectedChat(chat);
+          loadMessages(chat.id);
+        } catch (e) {
+          console.error('Failed to restore chat:', e);
+        }
+      }
     }
   }, [user]);
 
   const handleLogin = async (username, password) => {
+    console.log('[handleLogin] Called with view:', view);
     try {
       const res = await api.post('/api/auth/login', { username, password });
       setUser(res.data.user);
-      setView('chat');
+      localStorage.setItem('rage_user', JSON.stringify(res.data.user));
+      debugSetView('chat', 'handleLogin');
     } catch (err) {
+      console.error('[handleLogin] Error:', err);
       alert(err.response?.data?.error || 'Login failed');
     }
   };
@@ -129,7 +214,8 @@ function App() {
     try {
       const res = await api.post('/api/auth/register', { username, password });
       setUser(res.data.user);
-      setView('chat');
+      localStorage.setItem('rage_user', JSON.stringify(res.data.user));
+      debugSetView('chat', 'handleRegister');
     } catch (err) {
       alert(err.response?.data?.error || 'Registration failed');
     }
@@ -141,11 +227,29 @@ function App() {
     const messageData = {
       senderId: user.id,
       receiverId: selectedChat.id,
-      content: newMessage
+      content: newMessage,
+      // Temporary ID for optimistic update - use timestamp + random to avoid collisions
+      _id: 'temp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
+      createdAt: new Date().toISOString(),
+      status: 'sending'
     };
 
-    socket.emit('message:send', messageData);
+    // Optimistic update - add message immediately
+    setMessages(prev => [...prev, messageData]);
     setNewMessage('');
+    
+    // Scroll to bottom after sending
+    requestAnimationFrame(() => {
+      if (messagesEndRef.current) {
+        messagesEndRef.current.scrollIntoView();
+      }
+    });
+
+    socket.emit('message:send', {
+      senderId: user.id,
+      receiverId: selectedChat.id,
+      content: newMessage
+    });
   };
 
   const handleSearch = async (query) => {
@@ -183,6 +287,16 @@ function App() {
     }
   };
 
+  const handleClearChat = async (friendId) => {
+    if (!window.confirm('Очистить историю чата? Это действие нельзя отменить.')) return;
+    try {
+      await api.delete(`/api/messages/${user.id}/${friendId}`);
+      setMessages([]);
+    } catch (err) {
+      alert('Не удалось очистить чат');
+    }
+  };
+
   const handleUpdateProfile = async () => {
     try {
       const res = await api.put(`/api/users/${user.id}`, {
@@ -198,8 +312,10 @@ function App() {
   };
 
   const handleLogout = () => {
+    localStorage.removeItem('rage_user');
+    localStorage.removeItem('rage_selected_chat');
     setUser(null);
-    setView('login');
+    debugSetView('login', 'handleLogout');
     setSelectedChat(null);
     setMessages([]);
     setFriends([]);
@@ -225,7 +341,7 @@ function App() {
   // Render login/register views
   if (!user) {
     return (
-      <div className="min-h-screen bg-rage-bg flex items-center justify-center p-4">
+      <div className="min-h-screen flex items-center justify-center p-4" style={{ background: 'linear-gradient(to bottom, #0f0f1a, #1a1a2e, #16213e)' }}>
         <AuthForm 
           view={view} 
           setView={setView}
@@ -237,9 +353,9 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen bg-rage-bg flex">
+    <div className="h-screen bg-rage-bg flex">
       {/* Left Sidebar */}
-      <div className="w-80 bg-rage-bg-secondary flex flex-col border-r border-gray-800">
+      <div className="w-80 bg-rage-bg-secondary flex flex-col min-h-0 border-r border-gray-800">
         {/* User Profile */}
         <div 
           className="p-4 border-b border-gray-800 cursor-pointer hover:bg-gray-800 transition-colors"
@@ -262,6 +378,13 @@ function App() {
             <div>
               <div className="flex items-center gap-2">
                 <span className="font-semibold text-white">{user.username}</span>
+                {user.isDeveloper && (
+                  <span className="developer-badge" title="DEVELOPER">
+                    <svg viewBox="0 0 24 24" fill="white">
+                      <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                    </svg>
+                  </span>
+                )}
                 {user.isBetaTester && (
                   <span className="beta-badge" title="BETA TEST">β</span>
                 )}
@@ -298,6 +421,13 @@ function App() {
                     <div className="flex-1">
                       <div className="flex items-center gap-2">
                         <span className="text-white">{result.username}</span>
+                        {result.isDeveloper && (
+                          <span className="developer-badge" title="DEVELOPER">
+                            <svg viewBox="0 0 24 24" fill="white">
+                              <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                            </svg>
+                          </span>
+                        )}
                         {result.isBetaTester && (
                           <span className="beta-badge">β</span>
                         )}
@@ -318,7 +448,7 @@ function App() {
         <div className="flex-1 overflow-y-auto">
           <div className="p-3">
             <h3 className="text-gray-500 text-sm font-semibold mb-2">Friends</h3>
-            {friends.length === 0 ? (
+            {(!friends || friends.length === 0) ? (
               <p className="text-gray-500 text-sm text-center py-4">No friends yet. Search to add!</p>
             ) : (
               friends.map(friend => (
@@ -331,6 +461,7 @@ function App() {
                   }`}
                   onClick={() => {
                     setSelectedChat(friend);
+                    localStorage.setItem('rage_selected_chat', JSON.stringify(friend));
                     handleViewProfile(friend.id);
                   }}
                 >
@@ -349,6 +480,13 @@ function App() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="text-white font-medium truncate">{friend.username}</span>
+                      {friend.isDeveloper && (
+                        <span className="developer-badge" title="DEVELOPER">
+                          <svg viewBox="0 0 24 24" fill="white">
+                            <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                          </svg>
+                        </span>
+                      )}
                       {friend.isBetaTester && (
                         <span className="beta-badge">β</span>
                       )}
@@ -375,11 +513,11 @@ function App() {
       </div>
 
       {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col">
+      <div className="flex-1 flex flex-col h-full overflow-hidden">
         {selectedChat ? (
           <>
             {/* Chat Header */}
-            <div className="p-4 border-b border-gray-800 bg-rage-bg-secondary flex items-center justify-between">
+            <div className="p-4 border-b border-gray-800 bg-rage-bg-secondary flex items-center justify-between shrink-0">
               <div 
                 className="flex items-center gap-3 cursor-pointer"
                 onClick={() => handleViewProfile(selectedChat.id)}
@@ -399,6 +537,13 @@ function App() {
                 <div>
                   <div className="flex items-center gap-2">
                     <span className="font-semibold text-white">{selectedChat.username}</span>
+                    {selectedChat.isDeveloper && (
+                      <span className="developer-badge" title="DEVELOPER">
+                        <svg viewBox="0 0 24 24" fill="white">
+                          <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                        </svg>
+                      </span>
+                    )}
                     {selectedChat.isBetaTester && (
                       <span className="beta-badge" title="BETA TEST">β</span>
                     )}
@@ -407,12 +552,21 @@ function App() {
                     {selectedChat.isOnline ? 'Online' : 'Offline'}
                   </span>
                 </div>
+                <button
+                  onClick={() => handleClearChat(selectedChat.id)}
+                  className="text-gray-400 hover:text-red-500 transition-colors p-2"
+                  title="Очистить чат"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                </button>
               </div>
             </div>
 
             {/* Messages */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
-              {messages.map((msg, index) => {
+            <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4 scroll-smooth messages-container">
+              {messages?.map((msg, index) => {
                 const isOwn = msg.senderId === user.id;
                 return (
                   <div
@@ -441,7 +595,7 @@ function App() {
             </div>
 
             {/* Message Input */}
-            <div className="p-4 border-t border-gray-800 bg-rage-bg-secondary">
+            <div className="p-4 border-t border-gray-800 bg-rage-bg-secondary shrink-0">
               <div className="flex gap-3">
                 <input
                   type="text"
@@ -499,6 +653,13 @@ function App() {
                 <>
                   <div className="flex items-center justify-center gap-2 mb-2">
                     <h3 className="text-2xl font-bold text-white">{viewingProfile.username}</h3>
+                    {viewingProfile.isDeveloper && (
+                      <span className="developer-badge" title="DEVELOPER">
+                        <svg viewBox="0 0 24 24" fill="white">
+                          <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                        </svg>
+                      </span>
+                    )}
                     {viewingProfile.isBetaTester && (
                       <span className="beta-badge" title="BETA TEST">β</span>
                     )}
@@ -548,6 +709,13 @@ function App() {
                 <>
                   <div className="flex items-center justify-center gap-2 mb-2">
                     <h3 className="text-2xl font-bold text-white">{viewingProfile.username}</h3>
+                    {viewingProfile.isDeveloper && (
+                      <span className="developer-badge" title="DEVELOPER">
+                        <svg viewBox="0 0 24 24" fill="white">
+                          <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                        </svg>
+                      </span>
+                    )}
                     {viewingProfile.isBetaTester && (
                       <span className="beta-badge" title="BETA TEST">β</span>
                     )}
@@ -598,14 +766,14 @@ function AuthForm({ view, setView, onLogin, onRegister }) {
   };
 
   return (
-    <div className="min-h-screen gradient-bg flex flex-col items-center justify-center p-4">
+    <div className="min-h-screen flex flex-col items-center justify-center p-4" style={{ background: 'transparent' }}>
       {/* Animated background particles */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
         <div className="absolute w-64 h-64 bg-purple-600/10 rounded-full blur-3xl animate-pulse" style={{ top: '10%', left: '10%' }}></div>
         <div className="absolute w-96 h-96 bg-purple-800/10 rounded-full blur-3xl animate-pulse" style={{ bottom: '10%', right: '10%', animationDelay: '1s' }}></div>
       </div>
       
-      <div className="w-full max-w-md z-10">
+      <div className="w-full max-w-md z-10" style={{ background: 'transparent' }}>
         {/* Beautiful Logo */}
         <div className="text-center mb-8">
         <div className="relative inline-block">
@@ -618,9 +786,9 @@ function AuthForm({ view, setView, onLogin, onRegister }) {
       </div>
 
       {/* Toggle */}
-      <div className="flex mb-8 bg-rage-bg/50 backdrop-blur-sm rounded-xl p-1.5 w-full max-w-md z-10">
+      <div className="flex mb-8 rounded-xl p-1.5 w-full max-w-md z-10">
             <button
-              onClick={() => setView('login')}
+              onClick={() => { console.log('[toggle] clicking sign in'); setView('login'); }}
               className={`flex-1 py-3 rounded-lg font-semibold transition-all duration-300 ${
                 view === 'login' 
                   ? 'bg-gradient-to-r from-purple-600 to-purple-500 text-white shadow-lg shadow-purple-500/30' 
@@ -630,7 +798,7 @@ function AuthForm({ view, setView, onLogin, onRegister }) {
               Sign In
             </button>
             <button
-              onClick={() => setView('register')}
+              onClick={() => { console.log('[toggle] clicking sign up'); setView('register'); }}
               className={`flex-1 py-3 rounded-lg font-semibold transition-all duration-300 ${
                 view === 'register' 
                   ? 'bg-gradient-to-r from-purple-600 to-purple-500 text-white shadow-lg shadow-purple-500/30' 
@@ -642,7 +810,7 @@ function AuthForm({ view, setView, onLogin, onRegister }) {
           </div>
 
           {/* Form */}
-          <form onSubmit={handleSubmit} className="space-y-5">
+          <form onSubmit={handleSubmit} className="space-y-5 bg-transparent">
             <div>
               <label className="block text-gray-400 text-sm mb-2 font-medium">Username</label>
               <div className="relative">
@@ -655,7 +823,7 @@ function AuthForm({ view, setView, onLogin, onRegister }) {
                   type="text"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  className="w-full bg-white/5 border border-white/10 rounded-xl px-12 py-3.5 text-white placeholder-gray-500 focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all backdrop-blur-sm"
+                  className="w-full bg-transparent border-2 border-purple-600 rounded-xl px-12 py-3.5 text-white placeholder-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-500/20 transition-all backdrop-blur-sm"
                   placeholder="Enter your username"
                   minLength={3}
                   maxLength={20}
@@ -674,7 +842,7 @@ function AuthForm({ view, setView, onLogin, onRegister }) {
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="w-full bg-rage-bg border border-gray-700 rounded-xl px-12 py-3.5 text-white placeholder-gray-500 focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all"
+                  className="w-full bg-transparent border-2 border-purple-600 rounded-xl px-12 py-3.5 text-white placeholder-gray-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-500/20 transition-all"
                   placeholder="Enter your password"
                   minLength={6}
                 />

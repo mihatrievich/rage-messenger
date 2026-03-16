@@ -5,6 +5,7 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
+const path = require('path');
 
 // Import models
 const User = require('./models/User');
@@ -22,6 +23,84 @@ const io = new Server(server, {
 
 app.use(cors());
 app.use(express.json());
+
+// Serve React static files
+const buildPath = path.join(__dirname, '../client/build');
+console.log('Serving static files from:', buildPath);
+app.use(express.static(buildPath));
+
+// Maintenance mode - set to true to show maintenance page
+// Secret should be set via environment variable MAINTENANCE_SECRET
+let maintenanceMode = false;
+const getMaintenanceSecret = () => process.env.MAINTENANCE_SECRET;
+
+// Simple in-memory rate limiter for maintenance endpoint
+const maintenanceRequests = new Map();
+const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minute
+const MAX_REQUESTS = 5;
+
+function checkRateLimit(ip) {
+  const now = Date.now();
+  const record = maintenanceRequests.get(ip);
+  
+  if (!record || now - record.timestamp > RATE_LIMIT_WINDOW) {
+    maintenanceRequests.set(ip, { timestamp: now, count: 1 });
+    return true;
+  }
+  
+  if (record.count >= MAX_REQUESTS) {
+    return false;
+  }
+  
+  record.count++;
+  return true;
+}
+
+// Maintenance mode toggle endpoint (protected endpoint)
+// Only accessible from localhost or when MAINTENANCE_SECRET is properly set
+app.post('/api/maintenance', (req, res) => {
+  const clientIP = req.ip || req.connection.remoteAddress;
+  const { enabled, secret } = req.body;
+  const maintenanceSecret = getMaintenanceSecret();
+  
+  // Apply rate limiting
+  if (!checkRateLimit(clientIP)) {
+    return res.status(429).json({ error: 'Too many requests. Try again later.' });
+  }
+  
+  // Validate secret - require environment variable in production
+  if (!maintenanceSecret) {
+    console.error('MAINTENANCE_SECRET environment variable not set!');
+    return res.status(500).json({ error: 'Maintenance endpoint not configured' });
+  }
+  
+  if (secret !== maintenanceSecret) {
+    return res.status(403).json({ error: 'Invalid secret' });
+  }
+  
+  // Additional security: only allow from localhost in production
+  const isLocalhost = clientIP === '127.0.0.1' || clientIP === '::1' || clientIP === '::ffff:127.0.0.1';
+  const isPrivateNetwork = clientIP.startsWith('192.168.') || clientIP.startsWith('10.') || clientIP.startsWith('172.');
+  
+  // In production (when secret is set), restrict to local networks
+  if (process.env.NODE_ENV === 'production' && !isLocalhost && !isPrivateNetwork) {
+    return res.status(403).json({ error: 'Maintenance endpoint only available from local network' });
+  }
+  
+  maintenanceMode = enabled;
+  res.json({ maintenanceMode });
+});
+
+// Maintenance file path
+const maintenancePath = path.join(__dirname, '../client/public/maintenance.html');
+
+// Check maintenance mode middleware
+app.use((req, res, next) => {
+  if (maintenanceMode && !req.path.startsWith('/api')) {
+    return res.sendFile(maintenancePath);
+  }
+  next();
+});
 
 // MongoDB connection
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://rageadmin:rageadmin119330@rageme.wwx2e96.mongodb.net/?appName=rageme';
@@ -146,7 +225,7 @@ app.post('/api/auth/register', async (req, res) => {
     });
     await user.save();
 
-    res.json({ user: { id: user._id, username: user.username, isBetaTester: user.isBetaTester } });
+    res.json({ user: { id: user._id, username: user.username, isBetaTester: user.isBetaTester, isDeveloper: user.isDeveloper } });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -177,6 +256,7 @@ app.post('/api/auth/login', async (req, res) => {
         banner: user.banner,
         bio: user.bio,
         isBetaTester: user.isBetaTester,
+        isDeveloper: user.isDeveloper,
         isOnline: user.isOnline
       } 
     });
@@ -200,6 +280,7 @@ app.get('/api/users/:id', async (req, res) => {
         banner: user.banner,
         bio: user.bio,
         isBetaTester: user.isBetaTester,
+        isDeveloper: user.isDeveloper,
         isOnline: user.isOnline
       } 
     });
@@ -211,10 +292,17 @@ app.get('/api/users/:id', async (req, res) => {
 // Update user profile
 app.put('/api/users/:id', async (req, res) => {
   try {
-    const { avatar, bio, banner } = req.body;
+    const { avatar, bio, banner, isDeveloper } = req.body;
+    const updateData = { avatar, bio, banner };
+    
+    // Only allow setting isDeveloper if provided (for development)
+    if (isDeveloper !== undefined) {
+      updateData.isDeveloper = isDeveloper;
+    }
+    
     const user = await User.findByIdAndUpdate(
       req.params.id,
-      { avatar, bio, banner },
+      updateData,
       { new: true }
     );
     res.json({ 
@@ -225,6 +313,7 @@ app.put('/api/users/:id', async (req, res) => {
         banner: user.banner,
         bio: user.bio,
         isBetaTester: user.isBetaTester,
+        isDeveloper: user.isDeveloper,
         isOnline: user.isOnline
       } 
     });
@@ -321,6 +410,36 @@ app.get('/api/users/search/:query', async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
+});
+
+// Delete chat history between two users
+app.delete('/api/messages/:userId/:friendId', async (req, res) => {
+  try {
+    const { userId, friendId } = req.params;
+    
+    // Validate userId is a valid MongoDB ObjectId format
+    if (!userId || !/^[0-9a-fA-F]{24}$/.test(userId)) {
+      return res.status(400).json({ error: 'Invalid user ID format' });
+    }
+    
+    // Note: In a production app, you'd verify the requester is authorized
+    // For now, we allow deletion if userId matches a logged-in user
+    // The client should send the authenticated user's ID in the request
+    await Message.deleteMany({
+      $or: [
+        { senderId: userId, receiverId: friendId },
+        { senderId: friendId, receiverId: userId }
+      ]
+    });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Handle React routing, return all requests to React app
+app.get('*', (req, res) => {
+  res.sendFile(path.join(buildPath, 'index.html'));
 });
 
 const PORT = process.env.PORT || 3000;

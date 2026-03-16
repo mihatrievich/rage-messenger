@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "description": "RAGE - Modern real-time messenger",
   "scripts": {
-    "start": "concurrently \"npm run server\" \"npm run client\"",
+    "start": "cd server && npm start",
     "server": "cd server && npm start",
-    "client": "cd client && set PORT=3001 && npm start",
+    "build": "cd client && npm run build",
     "install-all": "npm install && cd server && npm install && cd ../client && npm install"
   },
   "devDependencies": {

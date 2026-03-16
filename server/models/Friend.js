@@ -17,6 +17,6 @@ const friendSchema = new mongoose.Schema({
   }
 });
 
-friendSchema.index({ user1: 1, user2: 1 });
+friendSchema.index({ user1: 1, user2: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model('Friend', friendSchema);
